@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Music, Volume2, VolumeX, Disc, Sparkles } from 'lucide-react';
+import { Music, Volume2, VolumeX, Disc, Sparkles, ExternalLink } from 'lucide-react';
 
 interface AudioPlayerProps {
   isPlaying: boolean;
@@ -7,23 +7,80 @@ interface AudioPlayerProps {
   onRequestStart?: () => void;
 }
 
+// Global declaration for YouTube IFrame API
+declare global {
+  interface Window {
+    YT: {
+      Player: new (
+        elementId: string | HTMLElement,
+        options: {
+          videoId: string;
+          height?: string | number;
+          width?: string | number;
+          playerVars?: {
+            autoplay?: 0 | 1;
+            controls?: 0 | 1;
+            disablekb?: 0 | 1;
+            fs?: 0 | 1;
+            modestbranding?: 0 | 1;
+            rel?: 0 | 1;
+            start?: number;
+            end?: number;
+            loop?: 0 | 1;
+            playsinline?: 0 | 1;
+            origin?: string;
+          };
+          events?: {
+            onReady?: (event: { target: YTPlayerInstance }) => void;
+            onStateChange?: (event: { data: number; target: YTPlayerInstance }) => void;
+            onError?: (event: unknown) => void;
+          };
+        }
+      ) => YTPlayerInstance;
+      PlayerState: {
+        ENDED: number;
+        PLAYING: number;
+        PAUSED: number;
+        BUFFERING: number;
+        CUED: number;
+      };
+    };
+    onYouTubeIframeAPIReady?: () => void;
+  }
+}
+
+interface YTPlayerInstance {
+  playVideo: () => void;
+  pauseVideo: () => void;
+  seekTo: (seconds: number, allowSeekAhead: boolean) => void;
+  getCurrentTime: () => number;
+  getPlayerState: () => number;
+  setVolume: (volume: number) => void;
+  destroy: () => void;
+}
+
+// YouTube Video ID provided by user: https://youtu.be/ZeFpigRaXbI
+const YT_VIDEO_ID = 'ZeFpigRaXbI';
+const REFF_START_SECONDS = 76; // 01:16 - "Cinta kita 'kan selalu terjaga..."
+const REFF_END_SECONDS = 122;   // 02:02 - Akhir Reff bagian pertama
+
 export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   isPlaying,
   onTogglePlay,
 }) => {
   const [showLyrics, setShowLyrics] = useState(false);
-  const [audioMode, setAudioMode] = useState<'synth' | 'mp3'>('synth');
-  const [volume, setVolume] = useState(0.85);
+  const [playerType, setPlayerType] = useState<'youtube' | 'synth'>('youtube');
+  const [isYtReady, setIsYtReady] = useState(false);
 
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const ytPlayerRef = useRef<YTPlayerInstance | null>(null);
+  const loopIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Synthesizer fallback refs
   const audioCtxRef = useRef<AudioContext | null>(null);
   const isSynthRunningRef = useRef(false);
   const synthTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Synthesize the romantic piano & string arrangement of "Lagu Pernikahan Kita" (Reff)
-  // Chord progression & romantic notes (Reff section):
-  // D -> A/C# -> Bm7 -> F#m/A -> G -> D/F# -> Em7 -> A7
-  // Melodic notes of the chorus ("Cinta kita 'kan selalu terjaga...")
+  // Synthesizer fallback for "Lagu Pernikahan Kita"
   const playSynthesizedChorusReff = useCallback(() => {
     try {
       const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -36,15 +93,9 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
       }
 
       const masterGain = ctx.createGain();
-      masterGain.gain.setValueAtTime(volume * 0.4, ctx.currentTime);
+      masterGain.gain.setValueAtTime(0.35, ctx.currentTime);
       masterGain.connect(ctx.destination);
 
-      // Reff notes:
-      // "Cin-ta ki-ta 'kan se-la-lu ter-ja-ga"
-      // "Hing-ga ak-hir ha-yat me-mi-sah-kan ki-ta"
-      // "Eng-kau dan a-ku, se-la-ma-nya"
-      // "Da-lam i-ka-tan su-ci per-ni-ka-han i-ni"
-      
       const noteFreqs: { [key: string]: number } = {
         'D3': 146.83, 'F#3': 185.00, 'A3': 220.00,
         'C#3': 138.59, 'E3': 164.81, 'B2': 123.47,
@@ -55,9 +106,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
         'E5': 659.25, 'F#5': 739.99
       };
 
-      // Sequence of notes for the chorus
-      const melodySequence: Array<{ note: string; time: number; dur: number; type?: 'piano' | 'string' }> = [
-        // Line 1: Cinta kita 'kan selalu terjaga (D - F#m/C#)
+      const melodySequence: Array<{ note: string; time: number; dur: number }> = [
         { note: 'F#4', time: 0.0, dur: 0.6 },
         { note: 'G4', time: 0.6, dur: 0.5 },
         { note: 'A4', time: 1.1, dur: 0.8 },
@@ -66,7 +115,6 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
         { note: 'B4', time: 3.5, dur: 0.6 },
         { note: 'A4', time: 4.1, dur: 1.4 },
 
-        // Line 2: Hingga akhir hayat memisahkan kita (Bm - F#m)
         { note: 'D4', time: 5.6, dur: 0.5 },
         { note: 'E4', time: 6.1, dur: 0.5 },
         { note: 'F#4', time: 6.6, dur: 0.8 },
@@ -75,14 +123,12 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
         { note: 'G4', time: 9.0, dur: 0.6 },
         { note: 'F#4', time: 9.6, dur: 1.4 },
 
-        // Line 3: Engkau dan aku, selamanya... (G - D/F#)
         { note: 'G4', time: 11.1, dur: 0.6 },
         { note: 'A4', time: 11.7, dur: 0.6 },
         { note: 'B4', time: 12.3, dur: 1.2 },
         { note: 'D5', time: 13.5, dur: 0.8 },
         { note: 'A4', time: 14.3, dur: 1.8 },
 
-        // Line 4: Dalam ikatan suci pernikahan ini (Em7 - A7 - D)
         { note: 'G4', time: 16.2, dur: 0.6 },
         { note: 'F#4', time: 16.8, dur: 0.6 },
         { note: 'E4', time: 17.4, dur: 0.8 },
@@ -92,7 +138,6 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
         { note: 'D4', time: 20.6, dur: 2.8 },
       ];
 
-      // Bass & chord pad accompaniment
       const chords: Array<{ notes: string[]; time: number; dur: number }> = [
         { notes: ['D3', 'F#3', 'A3'], time: 0.0, dur: 2.8 },
         { notes: ['C#3', 'E3', 'A3'], time: 2.8, dur: 2.8 },
@@ -107,73 +152,56 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
 
       const startTime = ctx.currentTime + 0.1;
 
-      // Play chords (warm electric piano / celesta tone)
       chords.forEach(({ notes, time, dur }) => {
         notes.forEach(noteName => {
           const freq = noteFreqs[noteName];
           if (!freq) return;
-
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();
-
           osc.type = 'triangle';
           osc.frequency.setValueAtTime(freq, startTime + time);
-
           gain.gain.setValueAtTime(0.001, startTime + time);
           gain.gain.linearRampToValueAtTime(0.08, startTime + time + 0.1);
           gain.gain.exponentialRampToValueAtTime(0.001, startTime + time + dur);
-
           osc.connect(gain);
           gain.connect(masterGain);
-
           osc.start(startTime + time);
           osc.stop(startTime + time + dur + 0.1);
         });
       });
 
-      // Play romantic melody (bell/grand piano tone with gentle attack)
       melodySequence.forEach(({ note, time, dur }) => {
         const freq = noteFreqs[note];
         if (!freq) return;
-
         const osc = ctx.createOscillator();
         const oscOvertone = ctx.createOscillator();
         const gain = ctx.createGain();
-
         osc.type = 'sine';
         osc.frequency.setValueAtTime(freq, startTime + time);
-
         oscOvertone.type = 'triangle';
         oscOvertone.frequency.setValueAtTime(freq * 2, startTime + time);
-
         gain.gain.setValueAtTime(0.001, startTime + time);
         gain.gain.linearRampToValueAtTime(0.18, startTime + time + 0.05);
         gain.gain.exponentialRampToValueAtTime(0.001, startTime + time + dur);
-
         osc.connect(gain);
         oscOvertone.connect(gain);
         gain.connect(masterGain);
-
         osc.start(startTime + time);
         oscOvertone.start(startTime + time);
-
         osc.stop(startTime + time + dur + 0.1);
         oscOvertone.stop(startTime + time + dur + 0.1);
       });
 
-      const totalDuration = 24; // 24 seconds per loop of the reff
       isSynthRunningRef.current = true;
-
-      // Repeat loop seamlessly
       synthTimerRef.current = setTimeout(() => {
         if (isSynthRunningRef.current) {
           playSynthesizedChorusReff();
         }
-      }, totalDuration * 1000);
+      }, 24 * 1000);
     } catch {
-      // AudioContext fallback
+      // Synth fallback
     }
-  }, [volume]);
+  }, []);
 
   const stopSynthesizer = useCallback(() => {
     isSynthRunningRef.current = false;
@@ -186,21 +214,122 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
     }
   }, []);
 
-  // Handle play/pause toggle
+  // Initialize YouTube IFrame Player
+  useEffect(() => {
+    let checkYtInterval: NodeJS.Timeout | null = null;
+
+    const initPlayer = () => {
+      if (window.YT && window.YT.Player) {
+        try {
+          ytPlayerRef.current = new window.YT.Player('yt-hidden-audio-player', {
+            videoId: YT_VIDEO_ID,
+            height: '1',
+            width: '1',
+            playerVars: {
+              autoplay: 0,
+              controls: 0,
+              disablekb: 1,
+              fs: 0,
+              modestbranding: 1,
+              rel: 0,
+              start: REFF_START_SECONDS,
+              end: REFF_END_SECONDS,
+              loop: 1,
+              playsinline: 1,
+            },
+            events: {
+              onReady: (event) => {
+                event.target.setVolume(90);
+                setIsYtReady(true);
+              },
+              onStateChange: (event) => {
+                // If ended, loop back to start of reff immediately
+                if (event.data === window.YT.PlayerState.ENDED) {
+                  event.target.seekTo(REFF_START_SECONDS, true);
+                  event.target.playVideo();
+                }
+              },
+              onError: () => {
+                // Fallback to synthesized audio if YT restricted
+                setPlayerType('synth');
+              },
+            },
+          });
+        } catch {
+          setPlayerType('synth');
+        }
+      }
+    };
+
+    if (window.YT && window.YT.Player) {
+      initPlayer();
+    } else {
+      checkYtInterval = setInterval(() => {
+        if (window.YT && window.YT.Player) {
+          if (checkYtInterval) clearInterval(checkYtInterval);
+          initPlayer();
+        }
+      }, 300);
+    }
+
+    return () => {
+      if (checkYtInterval) clearInterval(checkYtInterval);
+      if (ytPlayerRef.current && ytPlayerRef.current.destroy) {
+        try {
+          ytPlayerRef.current.destroy();
+        } catch {
+          // Cleanup
+        }
+      }
+    };
+  }, []);
+
+  // Monitor Reff loop timing (keep within 76s - 122s range)
+  useEffect(() => {
+    if (isPlaying && playerType === 'youtube' && isYtReady) {
+      loopIntervalRef.current = setInterval(() => {
+        if (ytPlayerRef.current && ytPlayerRef.current.getCurrentTime) {
+          const currentTime = ytPlayerRef.current.getCurrentTime();
+          if (currentTime >= REFF_END_SECONDS || currentTime < REFF_START_SECONDS - 2) {
+            ytPlayerRef.current.seekTo(REFF_START_SECONDS, true);
+          }
+        }
+      }, 1000);
+    } else {
+      if (loopIntervalRef.current) {
+        clearInterval(loopIntervalRef.current);
+        loopIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      if (loopIntervalRef.current) {
+        clearInterval(loopIntervalRef.current);
+      }
+    };
+  }, [isPlaying, playerType, isYtReady]);
+
+  // Handle Play / Pause commands
   useEffect(() => {
     if (isPlaying) {
-      if (audioMode === 'mp3' && audioRef.current) {
-        audioRef.current.play().catch(() => {
-          // If mp3 fails to play or load, fallback to high-fidelity synthesized reff melody
-          setAudioMode('synth');
+      if (playerType === 'youtube' && ytPlayerRef.current && isYtReady) {
+        try {
+          ytPlayerRef.current.seekTo(REFF_START_SECONDS, true);
+          ytPlayerRef.current.playVideo();
+        } catch {
+          setPlayerType('synth');
           playSynthesizedChorusReff();
-        });
-      } else {
+        }
+      } else if (playerType === 'synth') {
         playSynthesizedChorusReff();
       }
     } else {
-      if (audioRef.current) {
-        audioRef.current.pause();
+      if (ytPlayerRef.current && ytPlayerRef.current.pauseVideo) {
+        try {
+          ytPlayerRef.current.pauseVideo();
+        } catch {
+          // Pause error
+        }
       }
       stopSynthesizer();
     }
@@ -208,22 +337,14 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
     return () => {
       stopSynthesizer();
     };
-  }, [isPlaying, audioMode, playSynthesizedChorusReff, stopSynthesizer]);
+  }, [isPlaying, playerType, isYtReady, playSynthesizedChorusReff, stopSynthesizer]);
 
   return (
     <>
-      {/* Hidden audio element in case user provides mp3 source or browser supports direct stream */}
-      <audio
-        ref={audioRef}
-        loop
-        preload="auto"
-        onEnded={() => {
-          if (audioRef.current && isPlaying) {
-            audioRef.current.currentTime = 0;
-            audioRef.current.play();
-          }
-        }}
-      />
+      {/* Hidden container for YouTube IFrame Player */}
+      <div className="fixed -top-96 -left-96 w-1 h-1 pointer-events-none opacity-0 overflow-hidden">
+        <div id="yt-hidden-audio-player" />
+      </div>
 
       {/* Floating Audio Controller */}
       <div className="fixed bottom-20 right-3 sm:bottom-6 sm:right-6 z-40 flex flex-col items-end gap-2 pointer-events-auto">
@@ -237,18 +358,28 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
               </div>
               <button
                 onClick={() => setShowLyrics(false)}
-                className="text-gray-400 hover:text-gray-700 font-bold p-1 text-base leading-none"
+                className="text-gray-400 hover:text-gray-700 font-bold p-1 text-base leading-none cursor-pointer"
                 aria-label="Tutup lirik"
               >
                 ×
               </button>
             </div>
             
-            <p className="text-[11px] text-[#8C7A70] mb-2 font-medium">
+            <p className="text-[11px] text-[#8C7A70] mb-1 font-medium">
               Tiara Andini & Arsy Widianto (Bagian Reff)
             </p>
 
-            <div className="p-2.5 rounded-xl bg-[#FBF9F5] border border-[#EBE4D8] italic text-center text-[#55463D] leading-relaxed my-2">
+            <a
+              href="https://youtu.be/ZeFpigRaXbI?t=76"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-[10px] text-red-600 hover:underline mb-2 font-medium"
+            >
+              <span>Tonton di YouTube Official</span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+
+            <div className="p-2.5 rounded-xl bg-[#FBF9F5] border border-[#EBE4D8] italic text-center text-[#55463D] leading-relaxed my-1">
               &ldquo;Cinta kita &apos;kan selalu terjaga<br />
               Hingga akhir hayat memisahkan kita<br />
               Engkau dan aku selamanya<br />
@@ -257,10 +388,10 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
 
             <div className="flex items-center justify-between pt-2 text-[10px] text-gray-500">
               <span className="inline-flex items-center gap-1 text-[#8C6425]">
-                <Sparkles className="w-3 h-3 text-[#D4AF37]" /> Putar ulang otomatis (Loop)
+                <Sparkles className="w-3 h-3 text-[#D4AF37]" /> Putar Ulang Otomatis (Reff Loop)
               </span>
               <span className="text-[#A27B38] font-medium">
-                {isPlaying ? 'Sedang Berputar' : 'Dijeda'}
+                {isPlaying ? 'Sedang Diputar' : 'Dijeda'}
               </span>
             </div>
           </div>
@@ -268,7 +399,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
 
         {/* Floating Vinyl Button */}
         <div className="flex items-center gap-2">
-          {/* Subtle song label pill */}
+          {/* Song label pill */}
           <button
             onClick={() => setShowLyrics(!showLyrics)}
             className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/90 backdrop-blur-md border border-[#C9A96E]/40 shadow-lg text-[11px] font-medium text-[#655246] hover:bg-white hover:text-[#8C6425] transition-all cursor-pointer"
